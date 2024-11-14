@@ -39,13 +39,13 @@ import { TinyH264Decoder } from "@yume-chan/scrcpy-decoder-tinyh264";
 
 export const DEFAULT_SETTINGS = {
   maxSize: 1080,
-  videoBitRate: 4_000_000,
+  videoBitRate: 8000000,
   videoCodec: "h264",
   lockVideoOrientation: ScrcpyVideoOrientation.Unlocked,
   displayId: 0,
   crop: "",
   powerOn: true,
-  audio: true,
+  audio: false,
   audioCodec: "aac",
 };
 
@@ -56,6 +56,7 @@ function App() {
   const Manager = AdbDaemonWebUsbDeviceManager.BROWSER;
   const CredentialStore = new AdbWebCredentialStore("demo-web-adb");
   const [currentDevice, setCurrentDevice] = useState();
+  const [adb, setAdb] = useState();
   const lastKeyframe = useRef(0n);
   let decoder;
 
@@ -185,116 +186,7 @@ function App() {
       });
       const adb = new Adb(transport);
       alert(device.name);
-
-      //Scrcpy
-      console.log(VERSION); // 2.1
-      const server = await fetch(BIN).then((res) => res.arrayBuffer());
-      await AdbScrcpyClient.pushServer(
-        adb,
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array(server));
-            controller.close();
-          },
-        })
-      );
-
-      const H264Capabilities = TinyH264Decoder.capabilities.h264;
-      // const options = new ScrcpyOptions1_24({
-      //   // other options...
-      //   codecOptions: new CodecOptions({
-      //     profile: H264Capabilities.maxProfile,
-      //     level: H264Capabilities.maxLevel,
-      //   }),
-      // });
-
-      // const options = new AdbScrcpyOptions2_1(
-      //   new ScrcpyOptions2_3({
-      //     videoSource: "display",
-      //     video: true,
-      //     videoCodecOptions: new CodecOptions({
-      //       ...DEFAULT_SETTINGS,
-      //       // logLevel: ScrcpyLogLevel.Debug,
-      //       // scid: ScrcpyInstanceId.random(),
-      //       // sendDeviceMeta: true,
-      //       // sendDummyByte: true,
-      //     }),
-      //   })
-      // );
-      const videoCodecOptions = new CodecOptions({
-        profile: H264Capabilities.maxProfile,
-        level: H264Capabilities.maxLevel,
-      });
-      const options = new AdbScrcpyOptionsLatest(
-        new ScrcpyOptionsLatest({
-          // ...DEFAULT_SETTINGS,
-          // logLevel: ScrcpyLogLevel.Debug,
-          // scid: ScrcpyInstanceId.random(),
-          // sendDeviceMeta: false,
-          // sendDummyByte: false,
-          videoCodecOptions,
-        })
-      );
-
-      const client = await AdbScrcpyClient.start(
-        adb,
-        DEFAULT_SERVER_PATH,
-        // If server binary was downloaded manually, must provide the correct version
-        VERSION,
-        options
-      );
-
-      // Print output of Scrcpy server
-      void client.stdout.pipeTo(
-        new WritableStream({
-          write(chunk) {
-            console.log(chunk);
-          },
-        })
-      );
-
-      client.videoStream.then(({ stream, metadata }) => {
-        const decoder = new TinyH264Decoder(metadata.codec);
-
-        document.body.appendChild(decoder.renderer);
-
-        let lastKeyframe = 0n;
-        const handler = new InspectStream((packet) => {
-          console.log("Processing packet:", packet);
-          if (packet.type === "configuration") {
-            let croppedWidth;
-            let croppedHeight;
-            switch (metadata.codec) {
-              case ScrcpyVideoCodecId.H264:
-                ({ croppedWidth, croppedHeight } = h264ParseConfiguration(
-                  packet.data
-                ));
-                break;
-              case ScrcpyVideoCodecId.H265:
-                ({ croppedWidth, croppedHeight } = h265ParseConfiguration(
-                  packet.data
-                ));
-                break;
-              default:
-                throw new Error("Codec not supported");
-            }
-          } else if (packet.keyframe && packet.pts !== undefined) {
-            if (lastKeyframe) {
-              const interval = (Number(packet.pts - lastKeyframe) / 1000) | 0;
-            }
-            lastKeyframe = packet.pts;
-          }
-        });
-
-        stream.pipeThrough(handler).pipeTo(decoder.writable);
-        // stream.pipeTo(
-        //   new WritableStream({
-        //     write(packet) {
-        //       console.log("Packet processed:", packet);
-        //     },
-        //   })
-        // );
-      });
+      setAdb(adb);
 
       // `undefined` if `video: false` option was specified
       // if (client.videoStream) {
@@ -336,40 +228,6 @@ function App() {
       //       console.error(e);
       //     });
       // }
-
-      // `undefined` if `audio: false` option was given
-      if (client.audioStream) {
-        const metadata = await client.audioStream;
-        switch (metadata.type) {
-          case "disabled":
-            // Audio not supported by device
-            break;
-          case "errored":
-            // Other error when initializing audio
-            break;
-          case "success":
-            // Audio packets in the codec specified in options
-            const audioPacketStream = metadata.stream;
-            break;
-        }
-      }
-
-      // `undefined` if `control: false` option was given
-      const controller = client.controller;
-      const clipboardStream = options.clipboard;
-
-      clipboardStream
-        .pipeTo(
-          new WritableStream({
-            write(chunk) {
-              // Handle device clipboard change
-              console.log(chunk);
-            },
-          })
-        )
-        .catch((error) => {
-          console.error(error);
-        });
     } catch (error) {
       // `usb` package for Node.js doesn't throw a real `DOMException`
       // This check is compatible with both Chrome and `usb` package
@@ -391,6 +249,118 @@ function App() {
     currentDevice && currentDevice.close();
   };
 
+  const handleScreenCast = async () => {
+    //Scrcpy
+    console.log("VERSION=" + VERSION);
+    const server = await fetch(BIN).then((res) => res.arrayBuffer());
+    await AdbScrcpyClient.pushServer(
+      adb,
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Consumable(new Uint8Array(server)));
+          controller.close();
+        },
+      })
+    );
+
+    const H264Capabilities = TinyH264Decoder.capabilities.h264;
+    // const options = new ScrcpyOptions1_24({
+    //   // other options...
+    //   codecOptions: new CodecOptions({
+    //     profile: H264Capabilities.maxProfile,
+    //     level: H264Capabilities.maxLevel,
+    //   }),
+    // });
+
+    // const options = new AdbScrcpyOptions2_1(
+    //   new ScrcpyOptions2_3({
+    //     videoSource: "display",
+    //     video: true,
+    //     videoCodecOptions: new CodecOptions({
+    //       ...DEFAULT_SETTINGS,
+    //       // logLevel: ScrcpyLogLevel.Debug,
+    //       // scid: ScrcpyInstanceId.random(),
+    //       // sendDeviceMeta: true,
+    //       // sendDummyByte: true,
+    //     }),
+    //   })
+    // );
+    const videoCodecOptions = new CodecOptions({
+      profile: H264Capabilities.maxProfile,
+      level: H264Capabilities.maxLevel,
+    });
+    const options = new AdbScrcpyOptionsLatest(
+      new ScrcpyOptionsLatest({
+        ...DEFAULT_SETTINGS,
+        logLevel: ScrcpyLogLevel.Debug,
+        scid: ScrcpyInstanceId.random(),
+        sendDeviceMeta: false,
+        sendDummyByte: false,
+        videoCodecOptions,
+      })
+    );
+
+    const client = await AdbScrcpyClient.start(
+      adb,
+      DEFAULT_SERVER_PATH,
+      // If server binary was downloaded manually, must provide the correct version
+      VERSION,
+      options
+    );
+
+    // Print output of Scrcpy server
+    void client.stdout.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          console.log(chunk);
+        },
+      })
+    );
+
+    client.videoStream.then(({ stream, metadata }) => {
+      const decoder = new TinyH264Decoder();
+
+      document.body.appendChild(decoder.renderer);
+
+      let lastKeyframe = 0n;
+      const handler = new InspectStream((packet) => {
+        console.log("Processing packet:", packet);
+        if (packet.type === "configuration") {
+          let croppedWidth;
+          let croppedHeight;
+          switch (metadata.codec) {
+            case ScrcpyVideoCodecId.H264:
+              ({ croppedWidth, croppedHeight } = h264ParseConfiguration(
+                packet.data
+              ));
+              break;
+            case ScrcpyVideoCodecId.H265:
+              ({ croppedWidth, croppedHeight } = h265ParseConfiguration(
+                packet.data
+              ));
+              break;
+            default:
+              throw new Error("Codec not supported");
+          }
+        } else if (packet.keyframe && packet.pts !== undefined) {
+          if (lastKeyframe) {
+            const interval = (Number(packet.pts - lastKeyframe) / 1000) | 0;
+          }
+          lastKeyframe = packet.pts;
+        }
+      });
+
+      stream.pipeThrough(handler).pipeTo(decoder.writable);
+      // stream.pipeTo(
+      //   new WritableStream({
+      //     write(packet) {
+      //       console.log("Packet processed:", packet);
+      //     },
+      //   })
+      // );
+    });
+  };
+
   return (
     <div className="App">
       <header className="App-header">
@@ -401,6 +371,7 @@ function App() {
         <button onClick={requestPermission}>Request permission</button>
         <button onClick={connectToDevice}>Connect to device</button>
         <button onClick={disconnect}>Disconnect</button>
+        <button onClick={handleScreenCast}>Screen cast</button>
       </header>
     </div>
   );
