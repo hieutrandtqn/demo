@@ -3,6 +3,7 @@ import logo from "./logo.svg";
 import {
   ADB_DEFAULT_DEVICE_FILTER,
   AdbDaemonWebUsbDeviceManager,
+  AdbDaemonWebUsbDeviceWatcher,
 } from "@yume-chan/adb-daemon-webusb";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import { AdbDaemonTransport } from "@yume-chan/adb";
@@ -92,8 +93,36 @@ function App() {
   ];
 
   useEffect(() => {
+    async function handleDeviceChange(addedDeviceSerial) {
+      if (addedDeviceSerial) {
+        // A device with serial `addedDeviceSerial` is added
+        connectToDevice();
+        alert("connectToDevice()");
+        console.log("connectToDevice()");
+      } else {
+        // A device is removed
+
+        //Alway close adb
+        if (adb) {
+          await adb.close();
+          await destroyClient();
+          setAdb(undefined);
+        }
+        alert("destroyClient()");
+        console.log("destroyClient()");
+      }
+    }
+
+    const watcher = new AdbDaemonWebUsbDeviceWatcher(
+      handleDeviceChange,
+      navigator.usb
+    );
+
+    // Stop watching devices
+
     return () => {
       destroyClient();
+      watcher.dispose();
 
       deviceFrame.current.addEventListener("pointerdown", handlePointerDown);
       deviceFrame.current.addEventListener("pointermove", handlePointerMove);
@@ -103,6 +132,10 @@ function App() {
       deviceFrame.current.addEventListener("contextmenu", handleContextMenu);
     };
   }, []);
+
+  useEffect(() => {
+    adb && handleScreenCast();
+  }, [adb]);
 
   if (!Manager) {
     alert("WebUSB is not supported in this browser");
@@ -185,6 +218,10 @@ function App() {
     // 更新宽高并调整样式
     width.current = croppedWidth;
     height.current = croppedHeight;
+
+    deviceFrame.current.style.width = croppedWidth;
+    deviceFrame.current.style.height = croppedHeight;
+
     // changeStyle();
   };
 
@@ -214,16 +251,40 @@ function App() {
         connection,
         credentialStore: CredentialStore,
       });
-      const adb = new Adb(transport);
+
+      const newAdb = new Adb(transport);
       alert(device.serial);
-      setAdb(adb);
+      setAdb(newAdb);
     } catch (e) {
       console.error(e);
     }
   };
 
-  const disconnect = () => {
-    currentDevice && currentDevice.close();
+  const disconnect = async () => {
+    const container = deviceFrame.current;
+    if (container) {
+      container.removeEventListener("wheel", handleWheel);
+      container.removeEventListener("contextmenu", handleContextMenu);
+      container.removeEventListener("keydown", handleKeyCode);
+      container.removeEventListener("keyup", handleKeyCode);
+      container.removeEventListener("pointerdown", handlePointerDown);
+      container.removeEventListener("pointermove", handlePointerMove);
+      container.removeEventListener("pointerup", handlePointerUp);
+      container.removeEventListener("pointerleave", handlePointerLeave);
+    }
+    if (client.current) {
+      await client.current.close();
+    }
+    // if (adb) {
+    //   await adb.close();
+    //   setAdb(undefined);
+    // }
+    if (decoder) {
+      if (decoder.renderer && container) {
+        container.removeChild(decoder.renderer);
+      }
+      decoder = null;
+    }
   };
 
   const handleScreenCast = async () => {
@@ -467,6 +528,11 @@ function App() {
     if (client.current) {
       await client.current.close();
     }
+
+    // if (adb) {
+    //   await adb.close();
+    //   adb = null;
+    // }
 
     if (decoder) {
       if (decoder.renderer && container) {
