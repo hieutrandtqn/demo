@@ -22,8 +22,12 @@ import {
   AdbScrcpyOptionsLatest,
 } from "@yume-chan/adb-scrcpy";
 import {
+  AndroidKeyCode,
+  AndroidKeyEventAction,
+  AndroidKeyEventMeta,
   AndroidMotionEventAction,
   AndroidMotionEventButton,
+  AndroidScreenPowerMode,
   clamp,
   CodecOptions,
   DEFAULT_SERVER_PATH,
@@ -55,18 +59,13 @@ export const DEFAULT_SETTINGS = {
   audioCodec: "aac",
 };
 
-export const SCRCPY_SETTINGS_FILENAME = "/data/local/tmp/.tango.json";
-export const ADB_SYNC_MAX_PACKET_SIZE = 64 * 1024;
-
 function App() {
   const Manager = AdbDaemonWebUsbDeviceManager.BROWSER;
   const CredentialStore = new AdbWebCredentialStore("demo-web-adb");
-  const [currentDevice, setCurrentDevice] = useState();
   const [adb, setAdb] = useState();
-  const lastKeyframe = useRef(0n);
-  let decoder;
+  const [currentDevice, setCurrentDevice] = useState();
+  let decoder = useRef(null);
 
-  let options;
   let client = useRef(null);
   let rotation = 0;
   let hoverHelper = useRef(null);
@@ -77,13 +76,9 @@ function App() {
   // const {height: windowHeight, width: windowWidth} = useWindowResize();
   const deviceFrame = useRef();
   const openInput = useRef(false);
-  // 旋转角度常量
   const ROTATION_90 = 1;
   const ROTATION_180 = 2;
   const ROTATION_270 = 3;
-  /**
-   * 将鼠标事件按钮映射到 Android 按钮
-   */
   const MOUSE_EVENT_BUTTON_TO_ANDROID_BUTTON = [
     AndroidMotionEventButton.Primary,
     AndroidMotionEventButton.Tertiary,
@@ -96,8 +91,7 @@ function App() {
     async function handleDeviceChange(addedDeviceSerial) {
       if (addedDeviceSerial) {
         // A device with serial `addedDeviceSerial` is added
-        connectToDevice();
-        alert("connectToDevice()");
+        connectToDevice(0);
         console.log("connectToDevice()");
       } else {
         // A device is removed
@@ -108,7 +102,6 @@ function App() {
           await destroyClient();
           setAdb(undefined);
         }
-        alert("destroyClient()");
         console.log("destroyClient()");
       }
     }
@@ -119,22 +112,17 @@ function App() {
     );
 
     // Stop watching devices
-
     return () => {
       destroyClient();
       watcher.dispose();
-
-      deviceFrame.current.addEventListener("pointerdown", handlePointerDown);
-      deviceFrame.current.addEventListener("pointermove", handlePointerMove);
-      deviceFrame.current.addEventListener("pointerup", handlePointerUp);
-      deviceFrame.current.addEventListener("pointercancel", handlePointerUp);
-      deviceFrame.current.addEventListener("pointerleave", handlePointerLeave);
-      deviceFrame.current.addEventListener("contextmenu", handleContextMenu);
     };
   }, []);
 
   useEffect(() => {
-    adb && handleScreenCast();
+    (async () => {
+      await destroyClient();
+      adb && handleScreenCast();
+    })();
   }, [adb]);
 
   if (!Manager) {
@@ -150,99 +138,14 @@ function App() {
     }
   };
 
-  const initializeVideoStream = async (videoStream) => {
-    const { metadata, stream: videoPacketStream } = await videoStream;
-    console.log("Video metadata:", metadata);
-    console.log("Video metadata codec:", metadata.codec);
-
-    // Initialize the decoder
-    initializeDecoder(videoPacketStream, metadata);
-  };
-
-  const initializeDecoder = (stream, metadata) => {
-    try {
-      // Setting up the decoder
-      decoder = new WebCodecsVideoDecoder(metadata.codec);
-
-      deviceFrame.current.appendChild(decoder.renderer);
-      console.log("Adding a renderer to a container:", decoder.renderer);
-
-      // Reset keyframe tracking
-      lastKeyframe.current = 0n;
-
-      // Processing video packets
-      const handler = new InspectStream((packet) => {
-        handlePacket(packet, metadata);
-      });
-
-      handleWheelTest();
-
-      stream.pipeThrough(handler).pipeTo(decoder.writable);
-
-      // Connecting to video stream
-      if (stream && typeof stream.pipeTo === "function") {
-        // videoPacketStream.pipeThrough(handler).pipeTo(decoder.writable);
-        // .then((r) => console.log("pipeTo", r))
-        // .catch((e) => console.log("pipe error:", e));
-        console.log("The video stream is connected to the decoder");
-      } else {
-        console.error("videoPacketStream is invalid or unavailable");
-      }
-    } catch (error) {
-      console.error("Error initializing decoder:", error);
-    }
-  };
-
-  const handlePacket = (packet, metadata) => {
-    if (packet.type === "configuration") {
-      handleConfiguration(packet.data, metadata);
-    } else if (packet.keyframe && packet.pts !== undefined) {
-      handleKeyframe(packet);
-    }
-  };
-
-  const handleConfiguration = (data, metadata) => {
-    let croppedWidth, croppedHeight;
-    // 根据编码类型解析宽高
-    switch (metadata.codec) {
-      case ScrcpyVideoCodecId.H264:
-        ({ croppedWidth, croppedHeight } = h264ParseConfiguration(data));
-        break;
-      case ScrcpyVideoCodecId.H265:
-        ({ croppedWidth, croppedHeight } = h265ParseConfiguration(data));
-        break;
-      default:
-        throw new Error("Unsupported codec");
-    }
-    console.log(`[client] 视频尺寸变化: ${croppedWidth}x${croppedHeight}`);
-    // 更新宽高并调整样式
-    width.current = croppedWidth;
-    height.current = croppedHeight;
-
-    deviceFrame.current.style.width = croppedWidth;
-    deviceFrame.current.style.height = croppedHeight;
-
-    // changeStyle();
-  };
-
-  const handleKeyframe = (packet) => {
-    if (lastKeyframe.current) {
-      const interval = Math.floor(
-        Number(packet.pts - lastKeyframe.current) / 1000
-      );
-      console.log(`[client] Keyframe Interval: ${interval}ms`);
-    }
-    console.log(packet.keyframe, packet.pts, packet.data);
-    lastKeyframe.current = packet.pts;
-  };
-
-  const connectToDevice = async () => {
+  const connectToDevice = async (index) => {
+    await disconnect();
     const devices = await Manager.getDevices();
     if (!devices.length) {
       alert("No device connected");
       return;
     }
-    const device = devices[0];
+    const device = devices[index];
     setCurrentDevice(device);
     try {
       const connection = await device.connect();
@@ -253,7 +156,7 @@ function App() {
       });
 
       const newAdb = new Adb(transport);
-      alert(device.serial);
+      // alert(device.serial);
       setAdb(newAdb);
     } catch (e) {
       console.error(e);
@@ -261,30 +164,15 @@ function App() {
   };
 
   const disconnect = async () => {
-    const container = deviceFrame.current;
-    if (container) {
-      container.removeEventListener("wheel", handleWheel);
-      container.removeEventListener("contextmenu", handleContextMenu);
-      container.removeEventListener("keydown", handleKeyCode);
-      container.removeEventListener("keyup", handleKeyCode);
-      container.removeEventListener("pointerdown", handlePointerDown);
-      container.removeEventListener("pointermove", handlePointerMove);
-      container.removeEventListener("pointerup", handlePointerUp);
-      container.removeEventListener("pointerleave", handlePointerLeave);
+    if (adb) {
+      await adb.close();
+      setAdb(undefined);
     }
-    if (client.current) {
-      await client.current.close();
-    }
-    // if (adb) {
-    //   await adb.close();
-    //   setAdb(undefined);
-    // }
-    if (decoder) {
-      if (decoder.renderer && container) {
-        container.removeChild(decoder.renderer);
-      }
-      decoder = null;
-    }
+  };
+
+  const forgetDevice = async () => {
+    await disconnect();
+    await currentDevice?.raw.forget();
   };
 
   const handleScreenCast = async () => {
@@ -344,6 +232,88 @@ function App() {
     }
   };
 
+  const initializeVideoStream = async (videoStream) => {
+    const { metadata, stream: videoPacketStream } = await videoStream;
+    console.log("Video metadata:", metadata);
+    console.log("Video metadata codec:", metadata.codec);
+
+    // Initialize the decoder
+    initializeDecoder(videoPacketStream, metadata);
+  };
+
+  const initializeDecoder = (stream, metadata) => {
+    try {
+      // Setting up the decoder
+      decoder.current = new WebCodecsVideoDecoder(metadata.codec);
+
+      if (deviceFrame.current) {
+        deviceFrame.current.appendChild(decoder.current.renderer);
+
+        deviceFrame.current.addEventListener("pointerdown", handlePointerDown);
+        deviceFrame.current.addEventListener("pointermove", handlePointerMove);
+        deviceFrame.current.addEventListener("pointerup", handlePointerUp);
+        deviceFrame.current.addEventListener("pointercancel", handlePointerUp);
+        deviceFrame.current.addEventListener(
+          "pointerleave",
+          handlePointerLeave
+        );
+        deviceFrame.current.addEventListener("contextmenu", handleContextMenu);
+        openKeyInput("open");
+      }
+
+      console.log(
+        "Adding a renderer to a container:",
+        decoder.current.renderer
+      );
+
+      // Processing video packets
+      const handler = new InspectStream((packet) => {
+        handlePacket(packet, metadata);
+      });
+
+      handleWheelTest();
+
+      // Connecting to video stream
+      if (stream && typeof stream.pipeTo === "function") {
+        stream.pipeThrough(handler).pipeTo(decoder.current.writable);
+        console.log("The video stream is connected to the decoder");
+      } else {
+        console.error("videoPacketStream is invalid or unavailable");
+      }
+    } catch (error) {
+      console.error("Error initializing decoder:", error);
+    }
+  };
+
+  const handlePacket = (packet, metadata) => {
+    if (packet.type === "configuration") {
+      handleConfiguration(packet.data, metadata);
+    } else if (packet.keyframe && packet.pts !== undefined) {
+      // handleKeyframe(packet);
+    }
+  };
+
+  const handleConfiguration = (data, metadata) => {
+    let croppedWidth, croppedHeight;
+    switch (metadata.codec) {
+      case ScrcpyVideoCodecId.H264:
+        ({ croppedWidth, croppedHeight } = h264ParseConfiguration(data));
+        break;
+      case ScrcpyVideoCodecId.H265:
+        ({ croppedWidth, croppedHeight } = h265ParseConfiguration(data));
+        break;
+      default:
+        throw new Error("Unsupported codec");
+    }
+    console.log(`[client] 视频尺寸变化: ${croppedWidth}x${croppedHeight}`);
+    // 更新宽高并调整样式
+    width.current = croppedWidth;
+    height.current = croppedHeight;
+
+    deviceFrame.current.style.width = croppedWidth;
+    deviceFrame.current.style.height = croppedHeight;
+  };
+
   //Controller
   const clientPositionToDevicePosition = (clientX, clientY) => {
     if (!deviceFrame.current) {
@@ -396,19 +366,11 @@ function App() {
     });
   };
 
-  /**
-   * 防止事件的默认行为和传播
-   * @param {Event} event 事件对象
-   */
   const preventEventDefaults = (event) => {
     event.preventDefault();
     event.stopPropagation();
   };
 
-  /**
-   * 处理滚轮事件
-   * @param {WheelEvent} event 滚轮事件
-   */
   const handleWheel = async (event) => {
     preventEventDefaults(event); // 预防默认事件行为
 
@@ -483,6 +445,13 @@ function App() {
 
   const handleContextMenu = (event) => {
     preventEventDefaults(event);
+    toggleScreen();
+  };
+
+  const openKeyInput = (type) => {
+    const action = type === "open" ? "addEventListener" : "removeEventListener";
+    window[action]("keydown", handleKeyCode);
+    window[action]("keyup", handleKeyCode);
   };
 
   const handleKeyCode = async (e, code = null) => {
@@ -529,31 +498,135 @@ function App() {
       await client.current.close();
     }
 
-    // if (adb) {
-    //   await adb.close();
-    //   adb = null;
-    // }
-
-    if (decoder) {
-      if (decoder.renderer && container) {
-        container.removeChild(decoder.renderer);
+    if (decoder.current) {
+      if (decoder.current.renderer && container) {
+        container.removeChild(decoder.current.renderer);
       }
-      decoder = null;
+      decoder.current = null;
     }
+  };
+
+  const turnScreenOff = async () => {
+    await client.current.controller.setScreenPowerMode(
+      AndroidScreenPowerMode.Off
+    );
+  };
+
+  const turnScreenOn = async () => {
+    await client.current.controller.setScreenPowerMode(
+      AndroidScreenPowerMode.Normal
+    );
+  };
+
+  const toggleScreen = async () => {
+    await client.current.controller.backOrScreenOn({
+      action: AndroidKeyEventAction.Down,
+    });
+  };
+
+  const handleBackPointerDown = async (e) => {
+    if (!handlePointerDown(e)) {
+      return;
+    }
+    await client.current.controller.backOrScreenOn(AndroidKeyEventAction.Down);
+  };
+
+  const handleBackPointerUp = async (e) => {
+    if (!handlePointerUp(e)) {
+      return;
+    }
+    await client.current.controller.backOrScreenOn(AndroidKeyEventAction.Up);
+  };
+
+  const handleHomePointerDown = async (e) => {
+    if (!handlePointerDown(e)) {
+      return;
+    }
+    await client.current.controller.injectKeyCode({
+      action: AndroidKeyEventAction.Down,
+      keyCode: AndroidKeyCode.AndroidHome,
+      repeat: 0,
+      metaState: 0,
+    });
+  };
+
+  const handleHomePointerUp = async (e) => {
+    if (!handlePointerUp(e)) {
+      return;
+    }
+
+    await client.current.controller.injectKeyCode({
+      action: AndroidKeyEventAction.Up,
+      keyCode: AndroidKeyCode.AndroidHome,
+      repeat: 0,
+      metaState: 0,
+    });
+  };
+
+  const handleAppSwitchPointerDown = async (e) => {
+    if (!handlePointerDown(e)) {
+      return;
+    }
+
+    await client.current.controller.injectKeyCode({
+      action: AndroidKeyEventAction.Down,
+      keyCode: AndroidKeyCode.AndroidAppSwitch,
+      repeat: 0,
+      metaState: 0,
+    });
+  };
+
+  const handleAppSwitchPointerUp = async (e) => {
+    if (!handlePointerUp(e)) {
+      return;
+    }
+
+    await client.current.controller.injectKeyCode({
+      action: AndroidKeyEventAction.Up,
+      keyCode: AndroidKeyCode.AndroidAppSwitch,
+      repeat: 0,
+      metaState: 0,
+    });
   };
 
   return (
     <div className="App">
       <header className="App-header">
         <div ref={deviceFrame} className="deviceFrame"></div>
-        {/* <img src={logo} className="App-logo" alt="logo" /> */}
-        {/* <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p> */}
-        <button onClick={requestPermission}>Request permission</button>
-        <button onClick={connectToDevice}>Connect to device</button>
-        <button onClick={disconnect}>Disconnect</button>
-        <button onClick={handleScreenCast}>Screen cast</button>
+        <div>
+          <button
+            onPointerDown={handleBackPointerDown}
+            onPointerUp={handleBackPointerUp}
+          >
+            Back
+          </button>
+          <button
+            onPointerDown={handleHomePointerDown}
+            onPointerUp={handleHomePointerUp}
+          >
+            Home
+          </button>
+          <button
+            onPointerDown={handleAppSwitchPointerDown}
+            onPointerUp={handleAppSwitchPointerUp}
+          >
+            Menu
+          </button>
+        </div>
+        <div>
+          <button onClick={requestPermission}>Request permission</button>
+          <button onClick={() => connectToDevice(0)}>
+            Connect to device 1
+          </button>
+          <button onClick={() => connectToDevice(1)}>
+            Connect to device 2
+          </button>
+          <button onClick={disconnect}>Disconnect</button>
+          <button onClick={forgetDevice}>Forget device</button>
+          <button onClick={turnScreenOff}>Turn screen off</button>
+          <button onClick={turnScreenOn}>Turn screen on</button>
+          <button onClick={toggleScreen}>Toggle screen</button>
+        </div>
       </header>
     </div>
   );
